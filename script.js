@@ -57,7 +57,7 @@ let TASK_COST = 12;
 let currentTab = "pending";
 let formConfig = null;
 
-/* ================= Load API Config ================= */
+/* ================= API Config ================= */
 async function loadApiConfig() {
   const res = await fetch("ao.json", { cache: "no-store" });
   if (!res.ok) throw new Error("ao.json not found");
@@ -66,7 +66,42 @@ async function loadApiConfig() {
   if (!API) throw new Error("API_BASE missing in ao.json");
 }
 
-/* ================= Config + Dynamic Dropdown Engine ================= */
+/* ================= Inject Form Styles (so dropdowns show + scroll) ================= */
+function injectFormStylesOnce() {
+  if (document.getElementById("task-form-style")) return;
+
+  const st = document.createElement("style");
+  st.id = "task-form-style";
+  st.textContent = `
+    /* خلي الفورم نفسه قابل للسكرول داخل المودال */
+    #task-form{
+      max-height: 60vh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 6px 2px;
+    }
+    #task-form .ctrl{
+      margin-bottom: 10px;
+    }
+    #task-form input, #task-form select{
+      width: 100%;
+      display: block;
+      padding: 12px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.12);
+      background: rgba(0,0,0,.20);
+      color: rgba(255,255,255,.92);
+      outline: none;
+      font-size: 14px;
+    }
+    #task-form select{
+      cursor: pointer;
+    }
+  `;
+  document.head.appendChild(st);
+}
+
+/* ================= Config + Dropdown Engine ================= */
 let dropdownCfgs = [];
 let dropdownEls = [];
 
@@ -77,7 +112,7 @@ async function loadConfig() {
   buildForm();
 }
 
-function next7Days() {
+function next7DaysOptions() {
   const out = [];
   const d0 = new Date();
   d0.setHours(0, 0, 0, 0);
@@ -99,11 +134,34 @@ function next7Days() {
   return out;
 }
 
+function normalizeDropdownCfgs(raw) {
+  const defaults = ["subject", "date", "gov", "center"];
+  return (raw || []).map((cfg, i) => {
+    const c = { ...(cfg || {}) };
+
+    // لو ما فيه id نعطي id ثابت حسب الترتيب
+    if (!c.id) c.id = defaults[i] || `dd${i + 1}`;
+
+    // الدروب الثانية دائماً تواريخ (حتى لو ما حطّيت dynamic في config)
+    if (i === 1 && !c.dynamic) c.dynamic = "next_7_days";
+
+    // placeholder افتراضي
+    if (!c.placeholder) {
+      c.placeholder =
+        i === 0 ? "اختر المادة" :
+        i === 1 ? "اختر التاريخ" :
+        i === 2 ? "اختر المحافظة" :
+        i === 3 ? "اختر المركز" : "اختر";
+    }
+
+    return c;
+  });
+}
+
 function setSelectOptions(sel, options, placeholder) {
   const prev = sel.value;
   sel.innerHTML = "";
 
-  // placeholder
   const ph = document.createElement("option");
   ph.value = "";
   ph.textContent = placeholder || "اختر";
@@ -123,7 +181,6 @@ function setSelectOptions(sel, options, placeholder) {
     sel.appendChild(o);
   });
 
-  // keep selection if still exists
   const stillExists = normalized.some(o => o.value === prev);
   if (stillExists) sel.value = prev;
 
@@ -136,13 +193,10 @@ function getSelectValue(id) {
 }
 
 function resolveOptions(cfg) {
-  // dynamic dates
-  if (cfg.dynamic === "next_7_days") return next7Days();
+  if (cfg.dynamic === "next_7_days") return next7DaysOptions();
 
-  // no dependency -> static options
   if (!cfg.depends_on) return cfg.options || [];
 
-  // dependency path (one or many)
   const deps = Array.isArray(cfg.depends_on) ? cfg.depends_on : [cfg.depends_on];
 
   let node = cfg.options_map || {};
@@ -167,44 +221,53 @@ function refreshByParent(parentId, visited = new Set()) {
 
     if (deps.includes(parentId)) {
       setSelectOptions(dropdownEls[i], resolveOptions(cfg), cfg.placeholder);
-
-      const childId = cfg.id || dropdownEls[i].dataset.id;
-      refreshByParent(childId, visited);
+      refreshByParent(cfg.id, visited);
     }
   });
 }
 
 function buildForm() {
+  injectFormStylesOnce();
+
   el.taskForm.innerHTML = "";
-  dropdownCfgs = (formConfig?.form?.dropdowns || []);
+  dropdownCfgs = normalizeDropdownCfgs(formConfig?.form?.dropdowns || []);
   dropdownEls = [];
 
   // fields
   (formConfig?.form?.fields || []).forEach(f => {
+    const wrap = document.createElement("div");
+    wrap.className = "ctrl";
+
     const input = document.createElement("input");
     input.placeholder = f.placeholder;
     input.dataset.type = "field";
-    el.taskForm.appendChild(input);
+
+    wrap.appendChild(input);
+    el.taskForm.appendChild(wrap);
   });
 
   // dropdowns
   dropdownCfgs.forEach(cfg => {
+    const wrap = document.createElement("div");
+    wrap.className = "ctrl";
+
     const select = document.createElement("select");
     select.dataset.type = "dropdown";
-    select.dataset.id = cfg.id || "";
+    select.dataset.id = cfg.id;
 
     setSelectOptions(select, resolveOptions(cfg), cfg.placeholder);
 
     select.addEventListener("change", () => {
-      refreshByParent(select.dataset.id);
+      refreshByParent(cfg.id);
     });
 
     dropdownEls.push(select);
-    el.taskForm.appendChild(select);
+    wrap.appendChild(select);
+    el.taskForm.appendChild(wrap);
   });
 
-  // initial cascade refresh
-  dropdownEls.forEach(s => refreshByParent(s.dataset.id));
+  // initial cascade (لو في depends_on)
+  dropdownCfgs.forEach(cfg => refreshByParent(cfg.id));
 }
 
 /* ================= Bootstrap ================= */
@@ -258,9 +321,9 @@ async function loadTasks() {
       const st = document.createElement("div");
       st.className = "status-text";
       st.textContent =
-        t.status === "pending" ? "جارٍ النشر" :
+        t.status === "pending"   ? "جارٍ النشر" :
         t.status === "completed" ? "قيد الإنجاز" :
-        "مرفوضة";
+                                   "مرفوضة";
       card.appendChild(st);
     }
 
@@ -295,15 +358,15 @@ async function loadTasks() {
 
 /* ================= Modal ================= */
 el.addBtn.onclick = () => {
-  // regenerate dates every time modal opens
+  // مهم: الدروب الثانية (التواريخ) تتجدد كل مرة تفتح المودال
   dropdownCfgs.forEach((cfg, i) => {
     if (cfg.dynamic === "next_7_days") {
-      setSelectOptions(dropdownEls[i], next7Days(), cfg.placeholder);
+      setSelectOptions(dropdownEls[i], next7DaysOptions(), cfg.placeholder);
     }
   });
 
-  // ensure dependencies updated
-  dropdownEls.forEach(s => refreshByParent(s.dataset.id));
+  // cascade refresh
+  dropdownCfgs.forEach(cfg => refreshByParent(cfg.id));
 
   el.modal.classList.remove("hidden");
 };
@@ -318,13 +381,11 @@ el.submitBtn.onclick = async () => {
   const dropdowns = [...el.taskForm.querySelectorAll('[data-type="dropdown"]')]
     .map(s => s.value);
 
-  // validation: fields
   if (fields.some(v => !v)) {
     showNotice("يرجى تعبئة جميع الحقول");
     return;
   }
 
-  // validation: dropdowns must be selected (not empty)
   if (dropdowns.some(v => !v)) {
     showNotice("يرجى اختيار جميع القوائم");
     return;
