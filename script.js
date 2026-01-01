@@ -1,7 +1,7 @@
 const tg = Telegram.WebApp;
 tg.ready();
 
-const API = "https://ao4.fourwordbefore.space";
+let API = "";
 
 /* ================= DOM ================= */
 const el = {
@@ -103,6 +103,22 @@ async function bootstrap() {
   balances.trial > 0
     ? (el.trial.textContent = balances.trial, el.balTrial.classList.remove("hidden"))
     : el.balTrial.classList.add("hidden");
+}
+
+
+
+
+
+
+
+
+
+async function loadApiConfig() {
+  const res = await fetch("ao.json", { cache: "no-store" });
+  if (!res.ok) throw new Error("ao.json not found");
+  const cfg = await res.json();
+  API = (cfg.API_BASE || "").replace(/\/$/, "");
+  if (!API) throw new Error(" missing in ao.json");
 }
 
 /* ================= Load Tasks ================= */
@@ -227,6 +243,7 @@ el.tabs.forEach(btn => {
 /* ================= Init ================= */
 (async function init() {
   try {
+    await loadApiConfig();
     await loadConfig();
     await bootstrap();
     await loadTasks();
@@ -235,3 +252,4 @@ el.tabs.forEach(btn => {
     showNotice("خطأ في تحميل التطبيق");
   }
 })();
+
