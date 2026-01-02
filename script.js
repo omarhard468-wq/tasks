@@ -51,13 +51,6 @@ async function api(path, options = {}) {
   return data;
 }
 
-/* ================= State ================= */
-let balances = { available: 0, frozen: 0, trial: 0 };
-let TASK_COST = 12;
-let currentTab = "pending";
-let formConfig = null;
-
-/* ================= API Config ================= */
 async function loadApiConfig() {
   const res = await fetch("ao.json", { cache: "no-store" });
   if (!res.ok) throw new Error("ao.json not found");
@@ -66,208 +59,185 @@ async function loadApiConfig() {
   if (!API) throw new Error("API_BASE missing in ao.json");
 }
 
-/* ================= Inject Form Styles (so dropdowns show + scroll) ================= */
-function injectFormStylesOnce() {
-  if (document.getElementById("task-form-style")) return;
+/* ================= State ================= */
+let balances = { available: 0, frozen: 0, trial: 0 };
+let TASK_COST = 12;
+let currentTab = "pending";
+let formConfig = null;
 
-  const st = document.createElement("style");
-  st.id = "task-form-style";
-  st.textContent = `
-    /* خلي الفورم نفسه قابل للسكرول داخل المودال */
-    #task-form{
-      max-height: 60vh;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
-      padding: 6px 2px;
-    }
-    #task-form .ctrl{
-      margin-bottom: 10px;
-    }
-    #task-form input, #task-form select{
-      width: 100%;
-      display: block;
-      padding: 12px 12px;
-      border-radius: 12px;
-      border: 1px solid rgba(255,255,255,.12);
-      background: rgba(0,0,0,.20);
-      color: rgba(255,255,255,.92);
-      outline: none;
-      font-size: 14px;
-    }
-    #task-form select{
-      cursor: pointer;
-    }
-  `;
-  document.head.appendChild(st);
+// dropdown elements (built dynamically)
+let selSubject = null; // المادة
+let selDate = null;    // التاريخ
+let selGov = null;     // المحافظة
+let selCenter = null;  // المركز
+
+/* ================= Date helpers ================= */
+function formatDateISO(d) {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
 }
 
-/* ================= Config + Dropdown Engine ================= */
-let dropdownCfgs = [];
-let dropdownEls = [];
+function formatDateLabel(d) {
+  return d.toLocaleDateString("ar", {
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  });
+}
 
+function buildNext7Days() {
+  const out = [];
+  const base = new Date();
+  base.setHours(0, 0, 0, 0);
+
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(base);
+    d.setDate(base.getDate() + i);
+    out.push({
+      value: formatDateISO(d),
+      label: (i === 0 ? `اليوم • ${formatDateLabel(d)}` : formatDateLabel(d))
+    });
+  }
+  return out;
+}
+
+function fillDateDropdown() {
+  if (!selDate) return;
+  selDate.innerHTML = `<option value="" selected disabled>اختر التاريخ</option>`;
+  buildNext7Days().forEach(x => {
+    const o = document.createElement("option");
+    o.value = x.value;
+    o.textContent = x.label;
+    selDate.appendChild(o);
+  });
+}
+
+/* ================= Config + Form ================= */
 async function loadConfig() {
   const res = await fetch("config.json", { cache: "no-store" });
   if (!res.ok) throw new Error("config.json not found");
   formConfig = await res.json();
   buildForm();
+  wireDropdownLogic();
 }
 
-function next7DaysOptions() {
-  const out = [];
-  const d0 = new Date();
-  d0.setHours(0, 0, 0, 0);
-
-  for (let i = 0; i < 7; i++) {
-    const d = new Date(d0);
-    d.setDate(d0.getDate() + i);
-
-    const value = d.toISOString().slice(0, 10); // YYYY-MM-DD
-    const label = d.toLocaleDateString("ar", {
-      weekday: "short",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    });
-
-    out.push({ value, label });
-  }
-  return out;
+function getSubjectMap() {
+  // لازم تضيفه داخل config.json كما بشرح تحت
+  return formConfig?.form?.subject_map || {};
 }
 
-function normalizeDropdownCfgs(raw) {
-  const defaults = ["subject", "date", "gov", "center"];
-  return (raw || []).map((cfg, i) => {
-    const c = { ...(cfg || {}) };
-
-    // لو ما فيه id نعطي id ثابت حسب الترتيب
-    if (!c.id) c.id = defaults[i] || `dd${i + 1}`;
-
-    // الدروب الثانية دائماً تواريخ (حتى لو ما حطّيت dynamic في config)
-    if (i === 1 && !c.dynamic) c.dynamic = "next_7_days";
-
-    // placeholder افتراضي
-    if (!c.placeholder) {
-      c.placeholder =
-        i === 0 ? "اختر المادة" :
-        i === 1 ? "اختر التاريخ" :
-        i === 2 ? "اختر المحافظة" :
-        i === 3 ? "اختر المركز" : "اختر";
-    }
-
-    return c;
-  });
-}
-
-function setSelectOptions(sel, options, placeholder) {
-  const prev = sel.value;
-  sel.innerHTML = "";
+function setOptions(selectEl, placeholder, options) {
+  selectEl.innerHTML = "";
 
   const ph = document.createElement("option");
   ph.value = "";
-  ph.textContent = placeholder || "اختر";
+  ph.textContent = placeholder;
   ph.disabled = true;
   ph.selected = true;
-  sel.appendChild(ph);
+  selectEl.appendChild(ph);
 
-  const normalized = (options || []).map(opt => {
-    if (opt && typeof opt === "object") return opt; // {value,label}
-    return { value: String(opt), label: String(opt) };
-  });
-
-  normalized.forEach(opt => {
+  (options || []).forEach(opt => {
     const o = document.createElement("option");
-    o.value = opt.value;
-    o.textContent = opt.label;
-    sel.appendChild(o);
-  });
-
-  const stillExists = normalized.some(o => o.value === prev);
-  if (stillExists) sel.value = prev;
-
-  sel.disabled = normalized.length === 0;
-}
-
-function getSelectValue(id) {
-  const s = dropdownEls.find(x => x.dataset.id === id);
-  return s ? (s.value || "") : "";
-}
-
-function resolveOptions(cfg) {
-  if (cfg.dynamic === "next_7_days") return next7DaysOptions();
-
-  if (!cfg.depends_on) return cfg.options || [];
-
-  const deps = Array.isArray(cfg.depends_on) ? cfg.depends_on : [cfg.depends_on];
-
-  let node = cfg.options_map || {};
-  for (const depId of deps) {
-    const val = getSelectValue(depId);
-    if (!val) return cfg.fallback || [];
-    node = node?.[val];
-    if (!node) return cfg.fallback || [];
-  }
-
-  return Array.isArray(node) ? node : (cfg.fallback || []);
-}
-
-function refreshByParent(parentId, visited = new Set()) {
-  if (visited.has(parentId)) return;
-  visited.add(parentId);
-
-  dropdownCfgs.forEach((cfg, i) => {
-    const deps = cfg.depends_on
-      ? (Array.isArray(cfg.depends_on) ? cfg.depends_on : [cfg.depends_on])
-      : [];
-
-    if (deps.includes(parentId)) {
-      setSelectOptions(dropdownEls[i], resolveOptions(cfg), cfg.placeholder);
-      refreshByParent(cfg.id, visited);
-    }
+    o.value = opt;
+    o.textContent = opt;
+    selectEl.appendChild(o);
   });
 }
 
 function buildForm() {
-  injectFormStylesOnce();
-
   el.taskForm.innerHTML = "";
-  dropdownCfgs = normalizeDropdownCfgs(formConfig?.form?.dropdowns || []);
-  dropdownEls = [];
 
-  // fields
-  (formConfig?.form?.fields || []).forEach(f => {
-    const wrap = document.createElement("div");
-    wrap.className = "ctrl";
-
+  // fields (inputs)
+  (formConfig.form.fields || []).forEach(f => {
     const input = document.createElement("input");
     input.placeholder = f.placeholder;
     input.dataset.type = "field";
-
-    wrap.appendChild(input);
-    el.taskForm.appendChild(wrap);
+    el.taskForm.appendChild(input);
   });
 
-  // dropdowns
-  dropdownCfgs.forEach(cfg => {
-    const wrap = document.createElement("div");
-    wrap.className = "ctrl";
+  // dropdown 1: subject from config.json
+  selSubject = document.createElement("select");
+  selSubject.dataset.type = "dropdown";
+  selSubject.dataset.role = "subject";
+  selSubject.innerHTML = `<option value="" selected disabled>اختر المادة</option>`;
+  (formConfig.form.dropdowns?.[0]?.options || []).forEach(opt => {
+    const o = document.createElement("option");
+    o.value = opt;
+    o.textContent = opt;
+    selSubject.appendChild(o);
+  });
+  el.taskForm.appendChild(selSubject);
 
-    const select = document.createElement("select");
-    select.dataset.type = "dropdown";
-    select.dataset.id = cfg.id;
+  // dropdown 2: date auto
+  const dateWrap = document.createElement("div");
+  dateWrap.className = "date-wrap";
 
-    setSelectOptions(select, resolveOptions(cfg), cfg.placeholder);
+  const hint = document.createElement("div");
+  hint.className = "date-hint";
+  hint.textContent = "أقرب تاريخ متاح ابتدائاً من:";
+  dateWrap.appendChild(hint);
 
-    select.addEventListener("change", () => {
-      refreshByParent(cfg.id);
-    });
+  selDate = document.createElement("select");
+  selDate.dataset.type = "dropdown";
+  selDate.dataset.role = "date";
+  dateWrap.appendChild(selDate);
 
-    dropdownEls.push(select);
-    wrap.appendChild(select);
-    el.taskForm.appendChild(wrap);
+  el.taskForm.appendChild(dateWrap);
+
+  // fill dates now
+  fillDateDropdown();
+
+  // dropdown 3: governorate depends on subject
+  selGov = document.createElement("select");
+  selGov.dataset.type = "dropdown";
+  selGov.dataset.role = "gov";
+  selGov.disabled = true;
+  setOptions(selGov, "اختر المحافظة", []);
+  el.taskForm.appendChild(selGov);
+
+  // dropdown 4: center depends on subject + gov
+  selCenter = document.createElement("select");
+  selCenter.dataset.type = "dropdown";
+  selCenter.dataset.role = "center";
+  selCenter.disabled = true;
+  setOptions(selCenter, "اختر المركز", []);
+  el.taskForm.appendChild(selCenter);
+}
+
+function wireDropdownLogic() {
+  if (!selSubject || !selGov || !selCenter) return;
+
+  // subject => governorates
+  selSubject.addEventListener("change", () => {
+    const subject = selSubject.value;
+    const map = getSubjectMap();
+
+    const govs = (subject && map[subject]) ? Object.keys(map[subject]) : [];
+    setOptions(selGov, "اختر المحافظة", govs);
+    selGov.disabled = govs.length === 0;
+
+    // reset center
+    setOptions(selCenter, "اختر المركز", []);
+    selCenter.disabled = true;
   });
 
-  // initial cascade (لو في depends_on)
-  dropdownCfgs.forEach(cfg => refreshByParent(cfg.id));
+  // governorate => centers
+  selGov.addEventListener("change", () => {
+    const subject = selSubject.value;
+    const gov = selGov.value;
+    const map = getSubjectMap();
+
+    const centers =
+      (subject && gov && map[subject] && Array.isArray(map[subject][gov]))
+        ? map[subject][gov]
+        : [];
+
+    setOptions(selCenter, "اختر المركز", centers);
+    selCenter.disabled = centers.length === 0;
+  });
 }
 
 /* ================= Bootstrap ================= */
@@ -358,16 +328,8 @@ async function loadTasks() {
 
 /* ================= Modal ================= */
 el.addBtn.onclick = () => {
-  // مهم: الدروب الثانية (التواريخ) تتجدد كل مرة تفتح المودال
-  dropdownCfgs.forEach((cfg, i) => {
-    if (cfg.dynamic === "next_7_days") {
-      setSelectOptions(dropdownEls[i], next7DaysOptions(), cfg.placeholder);
-    }
-  });
-
-  // cascade refresh
-  dropdownCfgs.forEach(cfg => refreshByParent(cfg.id));
-
+  // تحديث قائمة التواريخ عند كل فتح (حتى لو الصفحة مفتوحة من يوم)
+  fillDateDropdown();
   el.modal.classList.remove("hidden");
 };
 
@@ -378,18 +340,22 @@ el.submitBtn.onclick = async () => {
   const fields = [...el.taskForm.querySelectorAll('[data-type="field"]')]
     .map(i => i.value.trim());
 
-  const dropdowns = [...el.taskForm.querySelectorAll('[data-type="dropdown"]')]
-    .map(s => s.value);
-
   if (fields.some(v => !v)) {
     showNotice("يرجى تعبئة جميع الحقول");
     return;
   }
 
-  if (dropdowns.some(v => !v)) {
-    showNotice("يرجى اختيار جميع القوائم");
-    return;
-  }
+  const dropdowns = [
+    selSubject?.value || "",
+    selDate?.value || "",
+    selGov?.value || "",
+    selCenter?.value || ""
+  ];
+
+  if (!dropdowns[0]) return showNotice("اختر المادة");
+  if (!dropdowns[1]) return showNotice("اختر التاريخ");
+  if (!dropdowns[2]) return showNotice("اختر المحافظة");
+  if (!dropdowns[3]) return showNotice("اختر المركز");
 
   let source = null;
   if (balances.available >= TASK_COST) source = "available";
